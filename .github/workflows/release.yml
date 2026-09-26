@@ -56,6 +56,9 @@ jobs:
     needs: [build-msvc, build-mingw]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4  # gh release 需要 git 上下文来解析 tag
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts

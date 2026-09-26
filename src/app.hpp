@@ -4,7 +4,19 @@
 #include "tui.hpp"
 #include <chrono>
 #include <memory>
+#include <string>
 #include <vector>
+
+// 配色主题
+struct Theme {
+    std::string id;    // 配置文件用
+    std::string name;  // 显示名
+    Attr header, headerPath, status;
+    Attr borderOn, borderOff, titleOn, titleOff;
+    Attr selOn, selOff, root;
+    Attr thumbOn, thumbOff, track;
+    Attr dlgText, dlgHint, dlgSel;
+};
 
 class TuiRegedit {
 public:
@@ -45,6 +57,7 @@ private:
     bool running_ = true;
     std::string statusMsg_;
     std::string currentPath_;
+    int themeIndex_ = 0;
 
     // 鼠标双击检测状态
     std::chrono::steady_clock::time_point lastMouseTime_{};
@@ -52,6 +65,12 @@ private:
     // 滚动条拖动状态
     bool sbDrag_ = false;
     int sbDragPane_ = -1;  // 0=树 1=值
+
+    // ---- 主题 ----
+    static const std::vector<Theme>& allThemes();
+    const Theme& theme() const { return allThemes()[(size_t)themeIndex_]; }
+    void loadTheme();
+    void saveTheme();
 
     // ---- 树操作 ----
     void initRoots();
@@ -95,6 +114,7 @@ private:
     int dialogMenu(const std::string& title, const std::vector<std::string>& options,
                    const std::string& hint = "");
     void dialogHelp();
+    void dialogAbout();
     bool dialogEditDword(const std::string& title, uint32_t& v);
     bool dialogEditQword(const std::string& title, uint64_t& v);
     bool dialogEditBinary(const std::string& title, std::vector<uint8_t>& data);
@@ -112,6 +132,7 @@ private:
     void actionImport();
     void actionRefresh();
     void actionGoto();
+    void actionTheme();
     void contextMenu();
     void setStatus(const std::string& s) { statusMsg_ = s; }
 };

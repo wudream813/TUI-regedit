@@ -33,12 +33,9 @@ struct Key {
         if (mouse || type != Char) return false;
         char lower = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
         char upper = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
-        if (ctrl && (ch == (char32_t)lower || ch == (char32_t)upper)) return true;
-        if (!ctrl && ch >= 1 && ch <= 26) {
-            char base = (char)('a' + ch - 1);
-            if (base == lower) return true;
-        }
-        return false;
+        // 控制码 1-26 恒为 Ctrl+字母 (Linux 原始字节; Windows 下 ctrl 标志同时置位)
+        if (ch >= 1 && ch <= 26) return (char)('a' + ch - 1) == lower;
+        return ctrl && (ch == (char32_t)lower || ch == (char32_t)upper);
     }
 };
 

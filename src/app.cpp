@@ -1,16 +1,21 @@
 // app.cpp - TUI Regedit 主应用实现
 #include "app.hpp"
 #include "util.hpp"
+#include "version.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 
 static Attr A(Color fg, Color bg = Color::Default, bool bold = false) {
@@ -97,12 +102,123 @@ static size_t cursorFromColumn(const std::string& buf, size_t left, int col) {
     }
     return pos;
 }
+static std::string centerDisplay(const std::string& s, int width) {
+    int w = utf8DisplayWidth(s);
+    if (w >= width) return s;
+    int left = (width - w) / 2;
+    return std::string((size_t)left, ' ') + s + std::string((size_t)(width - w - left), ' ');
+}
+static std::string buildInfo() {
+    std::string c;
+#if defined(_MSC_VER)
+    c = "MSVC ";
+    c += std::to_string(_MSC_VER);
+#elif defined(__MINGW64__) || defined(__MINGW32__)
+    c = "MinGW GCC " + std::to_string(__GNUC__) + "." + std::to_string(__GNUC_MINOR__) + "." + std::to_string(__GNUC_PATCHLEVEL__);
+#elif defined(__clang__)
+    c = "Clang " + std::to_string(__clang_major__) + "." + std::to_string(__clang_minor__);
+#elif defined(__GNUC__)
+    c = "GCC " + std::to_string(__GNUC__) + "." + std::to_string(__GNUC_MINOR__);
+#else
+    c = "unknown compiler";
+#endif
+#ifdef _WIN32
+    c += " / Windows x64";
+#else
+    c += " / POSIX";
+#endif
+    c += " / ";
+    c += __DATE__;
+    return c;
+}
+
+// ---------------- 主题 ----------------
+// 字段顺序: id, name, header, headerPath, status,
+//           borderOn, borderOff, titleOn, titleOff,
+//           selOn, selOff, root, thumbOn, thumbOff, track,
+//           dlgText, dlgHint, dlgSel
+const std::vector<Theme>& TuiRegedit::allThemes() {
+    static const std::vector<Theme> v = {
+        {"dark", "深色 (默认)",
+         A(Color::BrightWhite, Color::Blue, true), A(Color::Yellow, Color::Blue, true), A(Color::Black, Color::White),
+         A(Color::BrightCyan), A(Color::BrightBlack), A(Color::BrightCyan, Color::Default, true), A(Color::White),
+         A(Color::BrightWhite, Color::Blue, true), A(Color::BrightWhite, Color::BrightBlack), A(Color::Yellow, Color::Default, true),
+         A(Color::BrightCyan), A(Color::White), A(Color::BrightBlack),
+         A(Color::White, Color::Black), A(Color::Yellow, Color::Black), A(Color::BrightWhite, Color::Blue, true)},
+        {"light", "浅色",
+         A(Color::Black, Color::White, true), A(Color::Blue, Color::White, true), A(Color::Black, Color::Cyan),
+         A(Color::Blue), A(Color::BrightBlack), A(Color::Blue, Color::Default, true), A(Color::Black),
+         A(Color::White, Color::Blue, true), A(Color::White, Color::BrightBlack), A(Color::Blue, Color::Default, true),
+         A(Color::Blue), A(Color::Black), A(Color::BrightBlack),
+         A(Color::Black, Color::White), A(Color::Blue, Color::White), A(Color::White, Color::Blue, true)},
+        {"green", "复古绿",
+         A(Color::Black, Color::Green, true), A(Color::Yellow, Color::Green, true), A(Color::Black, Color::Green),
+         A(Color::Green), A(Color::BrightBlack), A(Color::Green, Color::Default, true), A(Color::White),
+         A(Color::Black, Color::Green, true), A(Color::BrightWhite, Color::BrightBlack), A(Color::Green, Color::Default, true),
+         A(Color::Green), A(Color::White), A(Color::BrightBlack),
+         A(Color::Green, Color::Black), A(Color::Yellow, Color::Black), A(Color::Black, Color::Green, true)},
+        {"ocean", "海洋",
+         A(Color::BrightCyan, Color::Blue, true), A(Color::BrightWhite, Color::Blue, true), A(Color::Black, Color::Cyan),
+         A(Color::Cyan), A(Color::Blue), A(Color::BrightCyan, Color::Default, true), A(Color::Cyan),
+         A(Color::Black, Color::Cyan, true), A(Color::White, Color::Blue), A(Color::Cyan, Color::Default, true),
+         A(Color::Cyan), A(Color::White), A(Color::Blue),
+         A(Color::White, Color::Black), A(Color::Cyan, Color::Black), A(Color::Black, Color::Cyan, true)},
+        {"mono", "单色",
+         A(Color::Black, Color::White, true), A(Color::White, Color::Black, true), A(Color::White, Color::Black),
+         A(Color::White), A(Color::BrightBlack), A(Color::White, Color::Default, true), A(Color::BrightBlack),
+         A(Color::Black, Color::White, true), A(Color::White, Color::BrightBlack), A(Color::White, Color::Default, true),
+         A(Color::White), A(Color::BrightBlack), A(Color::BrightBlack),
+         A(Color::White, Color::Black), A(Color::White, Color::Black, true), A(Color::Black, Color::White, true)},
+    };
+    return v;
+}
+
+static std::string themeConfigPath() {
+#ifdef _WIN32
+    std::string dir = ".";
+    const char* ad = std::getenv("APPDATA");
+    if (ad && *ad) dir = ad;
+    dir += "\\TuiRegedit";
+    CreateDirectoryA(dir.c_str(), nullptr);
+    return dir + "\\config.ini";
+#else
+    const char* home = std::getenv("HOME");
+    std::string dir = (home && *home) ? (std::string(home) + "/.config/tui-regedit") : std::string(".");
+    if (home && *home) {  // mkdir 非递归, 逐级创建
+        ::mkdir((std::string(home) + "/.config").c_str(), 0755);
+        ::mkdir(dir.c_str(), 0755);
+    }
+    return dir + "/config.ini";
+#endif
+}
+
+void TuiRegedit::loadTheme() {
+    themeIndex_ = 0;
+    std::ifstream f(themeConfigPath());
+    if (!f) return;
+    std::string line;
+    const std::string key = "theme=";
+    while (std::getline(f, line)) {
+        line = trimStr(line);
+        if (line.compare(0, key.size(), key) != 0) continue;
+        std::string id = trimStr(line.substr(key.size()));
+        for (size_t i = 0; i < allThemes().size(); i++) {
+            if (allThemes()[i].id == id) { themeIndex_ = (int)i; return; }
+        }
+    }
+}
+
+void TuiRegedit::saveTheme() {
+    std::ofstream f(themeConfigPath(), std::ios::trunc);
+    if (f) f << "# TUI Regedit config\ntheme=" << allThemes()[(size_t)themeIndex_].id << "\n";
+}
 
 TuiRegedit::TuiRegedit(std::unique_ptr<IRegistry> reg)
     : reg_(std::move(reg)), con_(Console::instance()) {}
 
 void TuiRegedit::run() {
     con_.init();
+    loadTheme();
     initRoots();
     setStatus("就绪。Ctrl+P 命令面板 │ ? 帮助。鼠标: 单击/双击/右键/滚轮，顶部路径可点击跳转。");
     while (running_) {
@@ -347,7 +463,6 @@ void TuiRegedit::handleMouse(const Key& k) {
     if (k.my == 0) { actionGoto(); return; }  // 单击顶部路径 -> 转到
 
     if (inTree) {
-        // 滚动条列优先命中
         int sbW = (int)visible_.size() > L.treeRows ? 1 : 0;
         int sbCol = L.treeX + 1 + (L.treeW - 2 - sbW);
         if (sbW && k.mx == sbCol && k.my >= L.treeListY && k.my < L.treeListY + L.treeRows) {
@@ -410,7 +525,8 @@ static Color typeColor(uint32_t t) {
 void TuiRegedit::drawBox(Screen& scr, int x, int y, int w, int h,
                          const std::string& title, bool active) {
     if (w < 4 || h < 3) return;
-    Attr bA = A(active ? Color::BrightCyan : Color::BrightBlack);
+    const Theme& th = theme();
+    Attr bA = active ? th.borderOn : th.borderOff;
     scr.putStr(x, y, "┌" + rep("─", w - 2) + "┐", bA);
     for (int r = 1; r < h - 1; r++) {
         scr.putStr(x, y + r, "│", bA);
@@ -421,20 +537,22 @@ void TuiRegedit::drawBox(Screen& scr, int x, int y, int w, int h,
     if (!title.empty()) {
         std::string t = " " + title + " ";
         if (utf8DisplayWidth(t) < w - 2)
-            scr.putStr(x + 2, y, t, A(active ? Color::BrightCyan : Color::White, Color::Default, active));
+            scr.putStr(x + 2, y, t, active ? th.titleOn : th.titleOff);
     }
 }
 
 void TuiRegedit::drawHeader(Screen& scr, const Layout& L) {
+    const Theme& th = theme();
     std::string left = " TUI Regedit ";
     std::string path = currentPath_.empty() ? "" : "— " + currentPath_;
-    scr.putStr(0, 0, padDisplay(left, L.W), A(Color::BrightWhite, Color::Blue, true));
+    scr.putStr(0, 0, padDisplay(left, L.W), th.header);
     int lw = utf8DisplayWidth(left);  // 路径高亮显示, 暗示可点击跳转
     if (lw < L.W && !path.empty())
-        scr.putStr(lw, 0, truncateDisplay(path, L.W - lw), A(Color::Yellow, Color::Blue, true));
+        scr.putStr(lw, 0, truncateDisplay(path, L.W - lw), th.headerPath);
 }
 
 void TuiRegedit::drawTreePane(Screen& scr, const Layout& L) {
+    const Theme& th = theme();
     bool active = (activePane_ == 0);
     char title[128];
     snprintf(title, sizeof(title), "注册表项 (%d/%d)", treeSel_ + 1, (int)visible_.size());
@@ -460,22 +578,22 @@ void TuiRegedit::drawTreePane(Screen& scr, const Layout& L) {
             std::string text = padDisplay(truncateDisplay(
                 std::string((size_t)(n->depth * 2), ' ') + marker + " " + n->name, textW), textW);
             if (sel)
-                scr.putStr(L.treeX + 1, yy, text,
-                           active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack));
+                scr.putStr(L.treeX + 1, yy, text, active ? th.selOn : th.selOff);
             else if (n->depth == 0)
-                scr.putStr(L.treeX + 1, yy, text, A(Color::Yellow, Color::Default, true));
+                scr.putStr(L.treeX + 1, yy, text, th.root);
             else
                 scr.putStr(L.treeX + 1, yy, text);
         }
         if (hasSb) {
             bool thumb = (r >= thY && r < thY + thH);
             scr.putStr(L.treeX + 1 + textW, yy, thumb ? "█" : "│",
-                       thumb ? A(active ? Color::BrightCyan : Color::White) : A(Color::BrightBlack));
+                       thumb ? (active ? th.thumbOn : th.thumbOff) : th.track);
         }
     }
 }
 
 void TuiRegedit::drawValuePane(Screen& scr, const Layout& L) {
+    const Theme& th = theme();
     bool active = (activePane_ == 1);
     char title[128];
     snprintf(title, sizeof(title), "值 (%d/%d)", values_.empty() ? 0 : valSel_ + 1, (int)values_.size());
@@ -488,10 +606,9 @@ void TuiRegedit::drawValuePane(Screen& scr, const Layout& L) {
     int dataW = iw - nameW - typeW - 4;
     if (dataW < 8) { dataW = 8; typeW = iw - nameW - dataW - 4; if (typeW < 8) typeW = 8; }
     int x = L.valX + 1;
-    scr.putStr(x, L.valY + 1, padDisplay(truncateDisplay(padDisplay("名称", nameW) + "│ " + padDisplay("类型", typeW) + "│ 数据", iw), iw),
-               A(Color::White, Color::Default, true));
-    scr.putStr(x, L.valY + 2, truncateDisplay(rep("─", nameW) + "┼─" + rep("─", typeW) + "┼─" + rep("─", dataW), iw),
-               A(Color::BrightBlack));
+    Attr hdrA = th.dlgText; hdrA.bold = true;
+    scr.putStr(x, L.valY + 1, padDisplay(truncateDisplay(padDisplay("名称", nameW) + "│ " + padDisplay("类型", typeW) + "│ 数据", iw), iw), hdrA);
+    scr.putStr(x, L.valY + 2, truncateDisplay(rep("─", nameW) + "┼─" + rep("─", typeW) + "┼─" + rep("─", dataW), iw), th.track);
     ensureVisible(valSel_, valTop_, L.valRows);
     int thY = 0, thH = 0;
     bool hasSb = sbW && scrollbarGeom((int)values_.size(), valTop_, L.valRows, thY, thH);
@@ -507,20 +624,20 @@ void TuiRegedit::drawValuePane(Screen& scr, const Layout& L) {
             std::string tp = truncateDisplay(v.typeName(), typeW);
             std::string dt = truncateDisplay(v.prettyData(), dataW);
             if (sel) {
-                Attr a = active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack);
-                scr.putStr(x, yy, padDisplay(padDisplay(nm, nameW) + "│ " + padDisplay(tp, typeW) + "│ " + dt, iw), a);
+                scr.putStr(x, yy, padDisplay(padDisplay(nm, nameW) + "│ " + padDisplay(tp, typeW) + "│ " + dt, iw),
+                           active ? th.selOn : th.selOff);
             } else {
                 scr.putStr(x, yy, padDisplay(nm, nameW));
-                scr.putStr(x + nameW, yy, "│ ", A(Color::BrightBlack));
+                scr.putStr(x + nameW, yy, "│ ", th.track);
                 scr.putStr(x + nameW + 2, yy, padDisplay(tp, typeW), A(typeColor(v.type)));
-                scr.putStr(x + nameW + 2 + typeW, yy, "│ ", A(Color::BrightBlack));
+                scr.putStr(x + nameW + 2 + typeW, yy, "│ ", th.track);
                 scr.putStr(x + nameW + 2 + typeW + 2, yy, padDisplay(dt, dataW));
             }
         }
         if (hasSb) {
             bool thumb = (r >= thY && r < thY + thH);
             scr.putStr(x + iw, yy, thumb ? "█" : "│",
-                       thumb ? A(active ? Color::BrightCyan : Color::White) : A(Color::BrightBlack));
+                       thumb ? (active ? th.thumbOn : th.thumbOff) : th.track);
         }
     }
 }
@@ -531,7 +648,7 @@ void TuiRegedit::drawStatusBar(Screen& scr, const Layout& L) {
     if (msgW < 10) msgW = L.W - 1;
     std::string line = truncateDisplay(" " + padDisplay(truncateDisplay(statusMsg_, msgW), msgW) + " " +
                                        padDisplay(truncateDisplay(reg_->backendName(), beW), beW), L.W);
-    scr.putStr(0, L.H - 1, padDisplay(line, L.W), A(Color::Black, Color::White));
+    scr.putStr(0, L.H - 1, padDisplay(line, L.W), theme().status);
 }
 
 void TuiRegedit::draw() {
@@ -562,6 +679,8 @@ void TuiRegedit::handleKey(const Key& k) {
     }
     if (k.type == Key::F1 || (k.type == Key::Char && k.ch == '?')) { dialogHelp(); return; }
     if (k.type == Key::F5) { actionRefresh(); return; }
+    if (k.type == Key::F9) { dialogAbout(); return; }
+    if (k.type == Key::F10) { actionTheme(); return; }
     if (k.type == Key::Char && (k.isCtrl('c') || k.isCtrl('q'))) { running_ = false; return; }
     if (k.type == Key::Char && (k.ch == 'q' || k.ch == 'Q')) { running_ = false; return; }
     if (k.type == Key::Esc) { running_ = false; return; }
@@ -663,6 +782,7 @@ void TuiRegedit::handleValueKey(const Key& k) {
 void TuiRegedit::dialogMsg(const std::string& title, const std::string& msg) {
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     auto lines = splitBy(msg, '\n');
     int contentW = 0;
     for (auto& ln : lines) contentW = std::max(contentW, utf8DisplayWidth(ln));
@@ -676,10 +796,8 @@ void TuiRegedit::dialogMsg(const std::string& title, const std::string& msg) {
         draw();
         drawBox(scr, x, y, w, h, title, true);
         for (size_t i = 0; i < lines.size() && (int)i < h - 4; i++)
-            scr.putStr(x + 2, y + 2 + (int)i, padDisplay(truncateDisplay(lines[i], w - 4), w - 4),
-                       A(Color::White, Color::Black));
-        scr.putStr(x + 2, y + h - 2, padDisplay(truncateDisplay("按 Enter / Esc 关闭", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+            scr.putStr(x + 2, y + 2 + (int)i, padDisplay(truncateDisplay(lines[i], w - 4), w - 4), th.dlgText);
+        scr.putStr(x + 2, y + h - 2, padDisplay(truncateDisplay("按 Enter / Esc 关闭", w - 4), w - 4), th.dlgHint);
         con_.present();
         Key k = con_.readKey();
         if (k.mouse) continue;
@@ -690,6 +808,7 @@ void TuiRegedit::dialogMsg(const std::string& title, const std::string& msg) {
 bool TuiRegedit::dialogConfirm(const std::string& title, const std::string& msg) {
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     auto lines = splitBy(msg, '\n');
     int contentW = 0;
     for (auto& ln : lines) contentW = std::max(contentW, utf8DisplayWidth(ln));
@@ -701,11 +820,10 @@ bool TuiRegedit::dialogConfirm(const std::string& title, const std::string& msg)
         draw();
         drawBox(scr, x, y, w, h, title, true);
         for (size_t i = 0; i < lines.size() && (int)i < h - 5; i++)
-            scr.putStr(x + 2, y + 2 + (int)i, padDisplay(truncateDisplay(lines[i], w - 4), w - 4),
-                       A(Color::BrightWhite, Color::Black));
+            scr.putStr(x + 2, y + 2 + (int)i, padDisplay(truncateDisplay(lines[i], w - 4), w - 4), th.dlgText);
         scr.putStr(x + 2, y + h - 3,
                    padDisplay(truncateDisplay("确定吗?  [Y]是  [N]否  (Enter=是, Esc=否)", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+                   th.dlgHint);
         con_.present();
         Key k = con_.readKey();
         if (k.mouse) continue;
@@ -723,6 +841,7 @@ bool TuiRegedit::dialogInput(const std::string& title, const std::string& prompt
                              const std::string& hint) {
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     int w = std::min(s.w - 6, 76);
     if (w < 40) w = s.w - 4;
     int h = hint.empty() ? 8 : 9;
@@ -734,7 +853,7 @@ bool TuiRegedit::dialogInput(const std::string& title, const std::string& prompt
     for (;;) {
         draw();
         drawBox(scr, x, y, w, h, title, true);
-        scr.putStr(x + 2, y + 2, padDisplay(truncateDisplay(prompt, w - 4), w - 4), A(Color::White, Color::Black));
+        scr.putStr(x + 2, y + 2, padDisplay(truncateDisplay(prompt, w - 4), w - 4), th.dlgText);
         size_t left = 0;
         while (left < cursor) {
             if (utf8DisplayWidth(buf.substr(left, cursor - left)) < fieldW) break;
@@ -753,14 +872,16 @@ bool TuiRegedit::dialogInput(const std::string& title, const std::string& prompt
                 dw += cw; i += len;
             }
         }
-        scr.putStr(x + 2, y + 4, "[ ", A(Color::BrightCyan, Color::Black));
-        scr.putStr(x + 4, y + 4, padDisplay(shown, fieldW), A(Color::BrightWhite, Color::Black));
-        scr.putStr(x + 4 + fieldW, y + 4, " ]", A(Color::BrightCyan, Color::Black));
+        Attr bracket = th.borderOn; bracket.bg = th.dlgText.bg;
+        scr.putStr(x + 2, y + 4, "[ ", bracket);
+        scr.putStr(x + 4, y + 4, padDisplay(shown, fieldW), th.dlgText);
+        scr.putStr(x + 4 + fieldW, y + 4, " ]", bracket);
         if (!hint.empty())
-            scr.putStr(x + 2, y + 6, padDisplay(truncateDisplay(hint, w - 4), w - 4), A(Color::BrightBlack, Color::Black));
+            scr.putStr(x + 2, y + 6, padDisplay(truncateDisplay(hint, w - 4), w - 4),
+                       A(Color::BrightBlack, th.dlgText.bg));
         scr.putStr(x + 2, y + h - 2,
                    padDisplay(truncateDisplay("Enter 确认 │ Esc 取消 │ ←→移动 │ 鼠标单击定位 │ Ctrl+U清空", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+                   th.dlgHint);
         con_.present();
         int cxx = (int)utf8DisplayWidth(buf.substr(left, cursor - left));
         con_.moveCursor(x + 4 + cxx, y + 4);
@@ -814,6 +935,7 @@ int TuiRegedit::dialogMenu(const std::string& title, const std::vector<std::stri
     if (options.empty()) return -1;
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     int contentW = 0;
     for (auto& o : options) contentW = std::max(contentW, utf8DisplayWidth(o));
     int w = std::min(s.w - 6, std::max(contentW + 8, 36));
@@ -832,17 +954,18 @@ int TuiRegedit::dialogMenu(const std::string& title, const std::vector<std::stri
             if (idx >= (int)options.size()) { scr.fillRect(x + 2, yy, w - 4, 1, " "); continue; }
             std::string t = truncateDisplay(options[idx], w - 6);
             if (idx == sel)
-                scr.putStr(x + 2, yy, padDisplay("▸ " + t, w - 4), A(Color::BrightWhite, Color::Blue, true));
+                scr.putStr(x + 2, yy, padDisplay("▸ " + t, w - 4), th.dlgSel);
             else
-                scr.putStr(x + 2, yy, padDisplay("  " + t, w - 4), A(Color::White, Color::Black));
+                scr.putStr(x + 2, yy, padDisplay("  " + t, w - 4), th.dlgText);
         }
         int fy = y + 2 + perPage;
         if (!hint.empty()) {
-            scr.putStr(x + 2, fy, padDisplay(truncateDisplay(hint, w - 4), w - 4), A(Color::BrightBlack, Color::Black));
+            scr.putStr(x + 2, fy, padDisplay(truncateDisplay(hint, w - 4), w - 4),
+                       A(Color::BrightBlack, th.dlgText.bg));
             fy++;
         }
         scr.putStr(x + 2, fy, padDisplay(truncateDisplay("↑↓选择 │ Enter确认 │ Esc取消 │ 单击选/双击确认/滚轮", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+                   th.dlgHint);
         con_.present();
         Key k = con_.readKey();
         if (k.mouse) {
@@ -922,6 +1045,8 @@ void TuiRegedit::dialogHelp() {
         "",
         "其它:",
         "  F1 / ?              显示本帮助",
+        "  F9                  关于本软件",
+        "  F10                 切换配色主题 (也可在命令面板里找)",
         "  Q / Esc / Ctrl+C    退出程序",
         "",
         "注意:",
@@ -933,11 +1058,13 @@ void TuiRegedit::dialogHelp() {
     };
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     int w = std::min(s.w - 4, 78);
     int h = std::min(s.h - 2, 28);
     int x = (s.w - w) / 2, y = (s.h - h) / 2;
     int top = 0;
     int perPage = h - 4;
+    Attr secA = th.dlgText; secA.bold = true;
     for (;;) {
         draw();
         drawBox(scr, x, y, w, h, "帮助 (↑↓/滚轮滚动, Esc关闭)", true);
@@ -947,9 +1074,9 @@ void TuiRegedit::dialogHelp() {
             int yy = y + 2 + r;
             if (idx >= (int)lines.size()) { scr.fillRect(x + 2, yy, w - 4, 1, " "); continue; }
             std::string ln = padDisplay(truncateDisplay(lines[idx], w - 4), w - 4);
-            Attr a = A(Color::White, Color::Black);
-            if (!lines[idx].empty() && lines[idx].find("【") == 0) a = A(Color::Yellow, Color::Black, true);
-            else if (!lines[idx].empty() && lines[idx].back() == ':') a = A(Color::Cyan, Color::Black, true);
+            Attr a = th.dlgText;
+            if (!lines[idx].empty() && lines[idx].find("【") == 0) a = th.dlgHint;
+            else if (!lines[idx].empty() && lines[idx].back() == ':') a = secA;
             scr.putStr(x + 2, yy, ln, a);
         }
         con_.present();
@@ -965,6 +1092,56 @@ void TuiRegedit::dialogHelp() {
         else if (k.type == Key::PgUp) top -= perPage;
         else if (k.type == Key::PgDn) top += perPage;
         else if (k.type == Key::Char && (k.ch == 'q' || k.ch == 'Q' || k.ch == '?')) return;
+    }
+}
+
+void TuiRegedit::dialogAbout() {
+    Size s = con_.getSize();
+    Screen& scr = con_.screen();
+    const Theme& th = theme();
+    std::vector<std::string> lines = {
+        "_____ _   _ ___   ____          _ _ _",
+        "|_   _| | | |_ _| |  _ \\ ___  __| (_) |_",
+        "  | | | | | || |  | |_) / _ \\/ _` | | __|",
+        "  | | | |_| || |  |  _ <  __/ (_| | | |_",
+        "  |_|  \\___/|___| |_| \\_\\___|\\__,_|_|\\__|",
+        "",
+        std::string("TUI Regedit v") + TUI_REGEDIT_VERSION,
+        "终端里的 Windows 注册表编辑器",
+        "",
+        "作者: wudream813",
+        "主页: https://github.com/wudream813/TUI-regedit",
+        "后端: " + reg_->backendName(),
+        "构建: " + buildInfo(),
+        "许可: MIT",
+    };
+    int contentW = 0;
+    for (auto& ln : lines) contentW = std::max(contentW, utf8DisplayWidth(ln));
+    int w = std::min(s.w - 6, contentW + 10);
+    if (w < 44) w = 44;
+    int h = (int)lines.size() + 6;
+    if (h > s.h - 2) h = s.h - 2;
+    int x = (s.w - w) / 2, y = (s.h - h) / 2;
+    Attr logoA = th.titleOn; logoA.bg = th.dlgText.bg;
+    Attr verA = th.dlgHint; verA.bold = true;
+    for (;;) {
+        draw();
+        drawBox(scr, x, y, w, h, "关于", true);
+        for (size_t i = 0; i < lines.size() && (int)i < h - 5; i++) {
+            std::string ln = centerDisplay(truncateDisplay(lines[i], w - 4), w - 4);
+            Attr a = th.dlgText;
+            if (i < 5) a = logoA;
+            else if (i == 6) a = verA;
+            scr.putStr(x + 2, y + 2 + (int)i, ln, a);
+        }
+        scr.putStr(x + 2, y + h - 2, centerDisplay("按任意键关闭", w - 4), th.dlgHint);
+        con_.present();
+        Key k = con_.readKey();
+        if (k.mouse) {
+            if (k.mpress) return;
+            continue;
+        }
+        if (k.type != Key::Unknown) return;
     }
 }
 
@@ -1012,6 +1189,7 @@ bool TuiRegedit::dialogEditBinary(const std::string& title, std::vector<uint8_t>
 bool TuiRegedit::dialogEditMulti(const std::string& title, std::vector<std::string>& lines) {
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     int w = std::min(s.w - 6, 76);
     int h = std::min(s.h - 4, 20);
     int x = (s.w - w) / 2, y = (s.h - h) / 2;
@@ -1029,18 +1207,19 @@ bool TuiRegedit::dialogEditMulti(const std::string& title, std::vector<std::stri
             int yy = y + 2 + r;
             if (idx >= (int)lines.size()) {
                 if (lines.empty() && r == 0)
-                    scr.putStr(x + 2, yy, padDisplay("(空, 按 A 添加一行)", w - 4), A(Color::BrightBlack, Color::Black));
+                    scr.putStr(x + 2, yy, padDisplay("(空, 按 A 添加一行)", w - 4),
+                               A(Color::BrightBlack, th.dlgText.bg));
                 else scr.fillRect(x + 2, yy, w - 4, 1, " ");
                 continue;
             }
             char num[16]; snprintf(num, sizeof(num), "%2d: ", idx + 1);
             std::string t = padDisplay(std::string(num) + truncateDisplay(lines[idx], w - 8), w - 4);
-            if (idx == sel) scr.putStr(x + 2, yy, t, A(Color::BrightWhite, Color::Blue, true));
-            else scr.putStr(x + 2, yy, t, A(Color::White, Color::Black));
+            if (idx == sel) scr.putStr(x + 2, yy, t, th.dlgSel);
+            else scr.putStr(x + 2, yy, t, th.dlgText);
         }
         scr.putStr(x + 2, y + h - 3,
                    padDisplay(truncateDisplay("Enter/E编辑 │ A添加 │ D删除 │ F2保存 │ Esc取消 │ 单击选/双击改", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+                   th.dlgHint);
         con_.present();
         Key k = con_.readKey();
         if (k.mouse) {
@@ -1115,16 +1294,19 @@ void TuiRegedit::commandPalette() {
         {"导出当前项", "Ctrl+E", [&]{ actionExport(); }},
         {"导入 .reg", "Ctrl+I", [&]{ actionImport(); }},
         {"刷新", "F5", [&]{ actionRefresh(); }},
+        {"切换配色主题", "F10", [&]{ actionTheme(); }},
         {"切换面板", "Tab", [&]{
             activePane_ = 1 - activePane_;
             setStatus(activePane_ == 0 ? "已切换到: 注册表项(树)" : "已切换到: 值列表");
         }},
         {"展开/收起当前项", "→/←", [&]{ if (selectedNode()) toggleExpand(selectedNode()); }},
         {"帮助", "F1", [&]{ dialogHelp(); }},
+        {"关于", "F9", [&]{ dialogAbout(); }},
         {"退出", "Q", [&]{ running_ = false; }},
     };
     Size s = con_.getSize();
     Screen& scr = con_.screen();
+    const Theme& th = theme();
     int w = std::min(s.w - 6, 64);
     int listH = std::min(10, s.h - 12);
     if (listH < 4) listH = 4;
@@ -1162,27 +1344,30 @@ void TuiRegedit::commandPalette() {
                 dw += cw; i += len;
             }
         }
-        scr.putStr(x + 2, y + 2, "> ", A(Color::BrightCyan, Color::Black));
-        scr.putStr(x + 4, y + 2, padDisplay(shown, fieldW), A(Color::BrightWhite, Color::Black));
-        scr.putStr(x + 2, y + 3, rep("─", w - 4), A(Color::BrightBlack, Color::Black));
+        Attr promptA = th.borderOn; promptA.bg = th.dlgText.bg;
+        scr.putStr(x + 2, y + 2, "> ", promptA);
+        scr.putStr(x + 4, y + 2, padDisplay(shown, fieldW), th.dlgText);
+        Attr sepA = th.track; sepA.bg = th.dlgText.bg;
+        scr.putStr(x + 2, y + 3, rep("─", w - 4), sepA);
         for (int r = 0; r < listH; r++) {
             int idx = top + r;
             int yy = y + 4 + r;
             if (idx >= (int)hit.size()) {
                 if (hit.empty() && r == 0)
-                    scr.putStr(x + 2, yy, padDisplay("无匹配命令", w - 4), A(Color::BrightBlack, Color::Black));
+                    scr.putStr(x + 2, yy, padDisplay("无匹配命令", w - 4),
+                               A(Color::BrightBlack, th.dlgText.bg));
                 else scr.fillRect(x + 2, yy, w - 4, 1, " ");
                 continue;
             }
             const auto& c = all[hit[idx]];
             std::string t = truncateDisplay(c.name + "  (" + c.keys + ")", w - 6);
             if (idx == sel)
-                scr.putStr(x + 2, yy, padDisplay("▸ " + t, w - 4), A(Color::BrightWhite, Color::Blue, true));
+                scr.putStr(x + 2, yy, padDisplay("▸ " + t, w - 4), th.dlgSel);
             else
-                scr.putStr(x + 2, yy, padDisplay("  " + t, w - 4), A(Color::White, Color::Black));
+                scr.putStr(x + 2, yy, padDisplay("  " + t, w - 4), th.dlgText);
         }
         scr.putStr(x + 2, y + h - 2, padDisplay(truncateDisplay("↑↓选择 │ Enter执行 │ Esc关闭 │ 输入过滤", w - 4), w - 4),
-                   A(Color::Yellow, Color::Black));
+                   th.dlgHint);
         con_.present();
         int cxx = (int)utf8DisplayWidth(filter.substr(left, cursor - left));
         con_.moveCursor(x + 4 + cxx, y + 2);
@@ -1565,6 +1750,17 @@ void TuiRegedit::actionGoto() {
     activePane_ = 0;
     dialogMsg("项不存在", "以下项不存在:\n" + p + "\n\n已定位到最近的已存在父项:\n" + (q.empty() ? "(无)" : q));
     setStatus("目标不存在, 已定位到: " + q);
+}
+
+void TuiRegedit::actionTheme() {
+    std::vector<std::string> opts;
+    for (size_t i = 0; i < allThemes().size(); i++)
+        opts.push_back(allThemes()[i].name + (i == (size_t)themeIndex_ ? "  (当前)" : ""));
+    int c = dialogMenu("配色主题", opts, "选择后立即生效并保存偏好");
+    if (c < 0) { setStatus("已取消。"); return; }
+    themeIndex_ = c;
+    saveTheme();
+    setStatus("已切换配色: " + allThemes()[(size_t)themeIndex_].name);
 }
 
 void TuiRegedit::contextMenu() {

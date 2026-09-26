@@ -3,6 +3,7 @@
 // Linux/macOS: 只能用 --mock 演示数据 (无真实注册表)
 #include "app.hpp"
 #include "registry.hpp"
+#include "version.hpp"
 #include <iostream>
 #include <string>
 
@@ -36,7 +37,7 @@ int main(int argc, char* argv[]) {
         std::string a = argv[i];
         if (a == "--mock") useMock = true;
         else if (a == "-h" || a == "--help") { printHelp(argv[0]); return 0; }
-        else if (a == "-v" || a == "--version") { std::cout << "TUI Regedit 1.2.0\n"; return 0; }
+        else if (a == "-v" || a == "--version") { std::cout << "TUI Regedit " TUI_REGEDIT_VERSION "\n"; return 0; }
         else { std::cerr << "未知参数: " << a << "\n用 --help 查看用法。\n"; return 1; }
     }
 

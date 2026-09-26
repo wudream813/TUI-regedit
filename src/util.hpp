@@ -9,6 +9,9 @@
 #include <iomanip>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX  // 禁用 windows.h 的 min/max 宏, 否则 std::min/std::max 在 MSVC 下报错
+#endif
 #include <windows.h>
 inline std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";

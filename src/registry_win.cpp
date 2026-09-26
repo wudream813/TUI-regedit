@@ -1,6 +1,9 @@
 // registry_win.cpp - Windows 真实注册表实现 (仅 _WIN32 编译)
 #ifdef _WIN32
 #include "registry.hpp"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <algorithm>
 #include <cstdlib>

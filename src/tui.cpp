@@ -163,6 +163,9 @@ void Screen::present() {
 
 #ifdef _WIN32
 // ================= Windows 实现 =================
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 void Console::init() {

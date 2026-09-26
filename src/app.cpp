@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -27,6 +28,17 @@ static int clampInt(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+// 滚动条几何: 计算滑块起始行 thY 与高度 thH (相对列表区); 无需滚动返回 false
+static bool scrollbarGeom(int total, int top, int rows, int& thY, int& thH) {
+    if (total <= rows || rows <= 1) return false;
+    thH = rows * rows / total;
+    if (thH < 1) thH = 1;
+    int maxTop = total - rows;
+    thY = maxTop <= 0 ? 0 : (rows - thH) * top / maxTop;
+    if (thY < 0) thY = 0;
+    if (thY + thH > rows) thY = rows - thH;
+    return true;
 }
 // 路径归一化: 修剪 / 转斜杠 / 补全根项缩写, 非法返回 ""
 static std::string normalizeRegPath(const std::string& in) {
@@ -54,6 +66,37 @@ static std::string normalizeRegPath(const std::string& in) {
     else return "";
     return sub.empty() ? canon : canon + "\\" + sub;
 }
+static std::string asciiLowerStr(std::string s) {
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+// 命令面板过滤: 子序列匹配 (ASCII 大小写不敏感)
+static bool fuzzyMatchCmd(const std::string& q, const std::string& t) {
+    if (q.empty()) return true;
+    std::string qs = asciiLowerStr(q), ts = asciiLowerStr(t);
+    size_t j = 0;
+    for (size_t i = 0; i < qs.size(); i++) {
+        j = ts.find(qs[i], j);
+        if (j == std::string::npos) return false;
+        j++;
+    }
+    return true;
+}
+// 由输入框内的列偏移反推字节光标
+static size_t cursorFromColumn(const std::string& buf, size_t left, int col) {
+    if (col <= 0) return left;
+    size_t pos = left;
+    int w = 0;
+    while (pos < buf.size()) {
+        size_t len = utf8NextCharLen(buf, pos);
+        size_t dl = 1;
+        uint32_t cp = utf8DecodeOne(buf.c_str() + pos, buf.size() - pos, dl);
+        int cw = isWideCodepoint(cp) ? 2 : 1;
+        if (w + cw > col) break;
+        w += cw; pos += len;
+    }
+    return pos;
+}
 
 TuiRegedit::TuiRegedit(std::unique_ptr<IRegistry> reg)
     : reg_(std::move(reg)), con_(Console::instance()) {}
@@ -61,7 +104,7 @@ TuiRegedit::TuiRegedit(std::unique_ptr<IRegistry> reg)
 void TuiRegedit::run() {
     con_.init();
     initRoots();
-    setStatus("就绪。鼠标: 单击选择/双击打开/右键菜单/滚轮滚动。? 帮助, Ctrl+L 跳转。");
+    setStatus("就绪。Ctrl+P 命令面板 │ ? 帮助。鼠标: 单击/双击/右键/滚轮，顶部路径可点击跳转。");
     while (running_) {
         draw();
         con_.present();
@@ -196,7 +239,7 @@ void TuiRegedit::toggleExpand(TreeNode* n) {
 TuiRegedit::Layout TuiRegedit::calcLayout(const Size& s) {
     Layout L;
     L.W = s.w; L.H = s.h;
-    int boxY = 1, boxH = s.h - 3;
+    int boxY = 1, boxH = s.h - 2;  // 顶栏 1 行 + 底状态栏 1 行, 中间全给面板
     int treeW = s.w * 40 / 100;
     if (treeW < 22) treeW = 22;
     if (treeW > s.w - 30) treeW = s.w - 30;
@@ -235,6 +278,29 @@ bool TuiRegedit::isDoubleClick(const Key& k) {
     return dbl;
 }
 
+void TuiRegedit::scrollbarJump(int pane, int my) {
+    Layout L = calcLayout(con_.getSize());
+    int total = pane == 0 ? (int)visible_.size() : (int)values_.size();
+    int rows = pane == 0 ? L.treeRows : L.valRows;
+    int listY = pane == 0 ? L.treeListY : L.valListY;
+    if (total <= rows || rows <= 1) return;
+    int thY, thH;
+    scrollbarGeom(total, 0, rows, thY, thH);  // thH 与 top 无关
+    int denom = rows - thH;
+    int t = denom <= 0 ? 0 : (my - listY - thH / 2) * (total - rows) / denom;
+    t = clampInt(t, 0, total - rows);
+    if (pane == 0) {
+        treeTop_ = t;
+        if (treeSel_ < t || treeSel_ >= t + rows) {
+            treeSel_ = clampInt(treeSel_, t, t + rows - 1);
+            refreshValues(); valSel_ = 0; valTop_ = 0;
+        }
+    } else {
+        valTop_ = t;
+        valSel_ = clampInt(valSel_, t, t + rows - 1);
+    }
+}
+
 void TuiRegedit::handleMouse(const Key& k) {
     Layout L = calcLayout(con_.getSize());
     bool inTree = inRect(k.mx, k.my, L.treeX, L.treeY, L.treeW, L.treeH);
@@ -252,7 +318,12 @@ void TuiRegedit::handleMouse(const Key& k) {
         }
         return;
     }
-    if (!k.mpress) return;  // 释放/拖动暂不处理
+    if (k.mrelease) { sbDrag_ = false; return; }
+    if (k.mdrag) {
+        if (sbDrag_) scrollbarJump(sbDragPane_, k.my);
+        return;
+    }
+    if (!k.mpress) return;
 
     if (k.mbutton == 3) {  // 右键: 选中 + 上下文菜单
         if (inTree) {
@@ -273,7 +344,27 @@ void TuiRegedit::handleMouse(const Key& k) {
     if (k.mbutton != 1) return;
 
     bool dbl = isDoubleClick(k);
+    if (k.my == 0) { actionGoto(); return; }  // 单击顶部路径 -> 转到
+
     if (inTree) {
+        // 滚动条列优先命中
+        int sbW = (int)visible_.size() > L.treeRows ? 1 : 0;
+        int sbCol = L.treeX + 1 + (L.treeW - 2 - sbW);
+        if (sbW && k.mx == sbCol && k.my >= L.treeListY && k.my < L.treeListY + L.treeRows) {
+            activePane_ = 0;
+            int thY, thH;
+            if (scrollbarGeom((int)visible_.size(), treeTop_, L.treeRows, thY, thH)) {
+                int r = k.my - L.treeListY;
+                if (r < thY) {
+                    treeSel_ = clampInt(treeSel_ - L.treeRows, 0, (int)visible_.size() - 1);
+                    refreshValues(); valSel_ = 0; valTop_ = 0;
+                } else if (r >= thY + thH) {
+                    treeSel_ = clampInt(treeSel_ + L.treeRows, 0, (int)visible_.size() - 1);
+                    refreshValues(); valSel_ = 0; valTop_ = 0;
+                } else { sbDrag_ = true; sbDragPane_ = 0; }
+            }
+            return;
+        }
         int idx = treeIndexAt(L, k.my);
         if (idx < 0) return;
         activePane_ = 0;
@@ -283,6 +374,19 @@ void TuiRegedit::handleMouse(const Key& k) {
         bool onMarker = (k.mx >= mkx && k.mx < mkx + 3);
         if (dbl || onMarker) toggleExpand(n);
     } else if (inVal) {
+        int sbW = (int)values_.size() > L.valRows ? 1 : 0;
+        int sbCol = L.valX + 1 + (L.valW - 2 - sbW);
+        if (sbW && k.mx == sbCol && k.my >= L.valListY && k.my < L.valListY + L.valRows) {
+            activePane_ = 1;
+            int thY, thH;
+            if (scrollbarGeom((int)values_.size(), valTop_, L.valRows, thY, thH)) {
+                int r = k.my - L.valListY;
+                if (r < thY) valSel_ = clampInt(valSel_ - L.valRows, 0, (int)values_.size() - 1);
+                else if (r >= thY + thH) valSel_ = clampInt(valSel_ + L.valRows, 0, (int)values_.size() - 1);
+                else { sbDrag_ = true; sbDragPane_ = 1; }
+            }
+            return;
+        }
         int idx = valIndexAt(L, k.my);
         if (idx < 0) return;
         activePane_ = 1;
@@ -322,8 +426,12 @@ void TuiRegedit::drawBox(Screen& scr, int x, int y, int w, int h,
 }
 
 void TuiRegedit::drawHeader(Screen& scr, const Layout& L) {
-    std::string line = truncateDisplay(" TUI Regedit " + (currentPath_.empty() ? "" : "— " + currentPath_), L.W);
-    scr.putStr(0, 0, padDisplay(line, L.W), A(Color::BrightWhite, Color::Blue, true));
+    std::string left = " TUI Regedit ";
+    std::string path = currentPath_.empty() ? "" : "— " + currentPath_;
+    scr.putStr(0, 0, padDisplay(left, L.W), A(Color::BrightWhite, Color::Blue, true));
+    int lw = utf8DisplayWidth(left);  // 路径高亮显示, 暗示可点击跳转
+    if (lw < L.W && !path.empty())
+        scr.putStr(lw, 0, truncateDisplay(path, L.W - lw), A(Color::Yellow, Color::Blue, true));
 }
 
 void TuiRegedit::drawTreePane(Screen& scr, const Layout& L) {
@@ -331,27 +439,39 @@ void TuiRegedit::drawTreePane(Screen& scr, const Layout& L) {
     char title[128];
     snprintf(title, sizeof(title), "注册表项 (%d/%d)", treeSel_ + 1, (int)visible_.size());
     drawBox(scr, L.treeX, L.treeY, L.treeW, L.treeH, title, active);
-    int iw = L.treeW - 2;
-    if (iw <= 0 || L.treeRows <= 0) return;
+    int sbW = (int)visible_.size() > L.treeRows ? 1 : 0;
+    int textW = L.treeW - 2 - sbW;
+    if (textW <= 0 || L.treeRows <= 0) return;
     ensureVisible(treeSel_, treeTop_, L.treeRows);
+    int thY = 0, thH = 0;
+    bool hasSb = sbW && scrollbarGeom((int)visible_.size(), treeTop_, L.treeRows, thY, thH);
     for (int r = 0; r < L.treeRows; r++) {
         int idx = treeTop_ + r;
         int yy = L.treeListY + r;
-        if (idx >= (int)visible_.size()) { scr.fillRect(L.treeX + 1, yy, iw, 1, " "); continue; }
-        TreeNode* n = visible_[idx];
-        bool sel = (idx == treeSel_);
-        std::string marker;
-        if (n->loaded && !n->hasChildren) marker = " • ";
-        else if (n->expanded) marker = "[-]";
-        else marker = "[+]";
-        std::string text = padDisplay(truncateDisplay(std::string((size_t)(n->depth * 2), ' ') + marker + " " + n->name, iw), iw);
-        if (sel)
-            scr.putStr(L.treeX + 1, yy, text,
-                       active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack));
-        else if (n->depth == 0)
-            scr.putStr(L.treeX + 1, yy, text, A(Color::Yellow, Color::Default, true));
-        else
-            scr.putStr(L.treeX + 1, yy, text);
+        if (idx >= (int)visible_.size()) {
+            scr.fillRect(L.treeX + 1, yy, textW, 1, " ");
+        } else {
+            TreeNode* n = visible_[idx];
+            bool sel = (idx == treeSel_);
+            std::string marker;
+            if (n->loaded && !n->hasChildren) marker = " • ";
+            else if (n->expanded) marker = "[-]";
+            else marker = "[+]";
+            std::string text = padDisplay(truncateDisplay(
+                std::string((size_t)(n->depth * 2), ' ') + marker + " " + n->name, textW), textW);
+            if (sel)
+                scr.putStr(L.treeX + 1, yy, text,
+                           active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack));
+            else if (n->depth == 0)
+                scr.putStr(L.treeX + 1, yy, text, A(Color::Yellow, Color::Default, true));
+            else
+                scr.putStr(L.treeX + 1, yy, text);
+        }
+        if (hasSb) {
+            bool thumb = (r >= thY && r < thY + thH);
+            scr.putStr(L.treeX + 1 + textW, yy, thumb ? "█" : "│",
+                       thumb ? A(active ? Color::BrightCyan : Color::White) : A(Color::BrightBlack));
+        }
     }
 }
 
@@ -360,7 +480,8 @@ void TuiRegedit::drawValuePane(Screen& scr, const Layout& L) {
     char title[128];
     snprintf(title, sizeof(title), "值 (%d/%d)", values_.empty() ? 0 : valSel_ + 1, (int)values_.size());
     drawBox(scr, L.valX, L.valY, L.valW, L.valH, title, active);
-    int iw = L.valW - 2;
+    int sbW = (int)values_.size() > L.valRows ? 1 : 0;
+    int iw = L.valW - 2 - sbW;
     if (iw <= 4 || L.valRows <= 0) return;
     int nameW = std::max(8, iw * 30 / 100);
     int typeW = 15;
@@ -372,24 +493,34 @@ void TuiRegedit::drawValuePane(Screen& scr, const Layout& L) {
     scr.putStr(x, L.valY + 2, truncateDisplay(rep("─", nameW) + "┼─" + rep("─", typeW) + "┼─" + rep("─", dataW), iw),
                A(Color::BrightBlack));
     ensureVisible(valSel_, valTop_, L.valRows);
+    int thY = 0, thH = 0;
+    bool hasSb = sbW && scrollbarGeom((int)values_.size(), valTop_, L.valRows, thY, thH);
     for (int r = 0; r < L.valRows; r++) {
         int idx = valTop_ + r;
         int yy = L.valListY + r;
-        if (idx >= (int)values_.size()) { scr.fillRect(x, yy, iw, 1, " "); continue; }
-        const RegValue& v = values_[idx];
-        bool sel = (idx == valSel_);
-        std::string nm = truncateDisplay(v.displayName(), nameW);
-        std::string tp = truncateDisplay(v.typeName(), typeW);
-        std::string dt = truncateDisplay(v.prettyData(), dataW);
-        if (sel) {
-            Attr a = active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack);
-            scr.putStr(x, yy, padDisplay(padDisplay(nm, nameW) + "│ " + padDisplay(tp, typeW) + "│ " + dt, iw), a);
+        if (idx >= (int)values_.size()) {
+            scr.fillRect(x, yy, iw, 1, " ");
         } else {
-            scr.putStr(x, yy, padDisplay(nm, nameW));
-            scr.putStr(x + nameW, yy, "│ ", A(Color::BrightBlack));
-            scr.putStr(x + nameW + 2, yy, padDisplay(tp, typeW), A(typeColor(v.type)));
-            scr.putStr(x + nameW + 2 + typeW, yy, "│ ", A(Color::BrightBlack));
-            scr.putStr(x + nameW + 2 + typeW + 2, yy, padDisplay(dt, dataW));
+            const RegValue& v = values_[idx];
+            bool sel = (idx == valSel_);
+            std::string nm = truncateDisplay(v.displayName(), nameW);
+            std::string tp = truncateDisplay(v.typeName(), typeW);
+            std::string dt = truncateDisplay(v.prettyData(), dataW);
+            if (sel) {
+                Attr a = active ? A(Color::BrightWhite, Color::Blue, true) : A(Color::BrightWhite, Color::BrightBlack);
+                scr.putStr(x, yy, padDisplay(padDisplay(nm, nameW) + "│ " + padDisplay(tp, typeW) + "│ " + dt, iw), a);
+            } else {
+                scr.putStr(x, yy, padDisplay(nm, nameW));
+                scr.putStr(x + nameW, yy, "│ ", A(Color::BrightBlack));
+                scr.putStr(x + nameW + 2, yy, padDisplay(tp, typeW), A(typeColor(v.type)));
+                scr.putStr(x + nameW + 2 + typeW, yy, "│ ", A(Color::BrightBlack));
+                scr.putStr(x + nameW + 2 + typeW + 2, yy, padDisplay(dt, dataW));
+            }
+        }
+        if (hasSb) {
+            bool thumb = (r >= thY && r < thY + thH);
+            scr.putStr(x + iw, yy, thumb ? "█" : "│",
+                       thumb ? A(active ? Color::BrightCyan : Color::White) : A(Color::BrightBlack));
         }
     }
 }
@@ -400,12 +531,7 @@ void TuiRegedit::drawStatusBar(Screen& scr, const Layout& L) {
     if (msgW < 10) msgW = L.W - 1;
     std::string line = truncateDisplay(" " + padDisplay(truncateDisplay(statusMsg_, msgW), msgW) + " " +
                                        padDisplay(truncateDisplay(reg_->backendName(), beW), beW), L.W);
-    scr.putStr(0, L.H - 2, padDisplay(line, L.W), A(Color::Black, Color::White));
-}
-
-void TuiRegedit::drawFooter(Screen& scr, const Layout& L) {
-    std::string f = " Tab切换 │ ↑↓移动 │ →展开/←收起 │ E编辑 │ N新建 │ D删除 │ R重命名 │ F查找 │ Ctrl+L跳转 │ F5刷新 │ ?帮助 │ Q退出 │ 鼠标:单击选/双击开/右键菜单 ";
-    scr.putStr(0, L.H - 1, padDisplay(truncateDisplay(f, L.W), L.W), A(Color::BrightBlack));
+    scr.putStr(0, L.H - 1, padDisplay(line, L.W), A(Color::Black, Color::White));
 }
 
 void TuiRegedit::draw() {
@@ -413,9 +539,9 @@ void TuiRegedit::draw() {
     Screen& scr = con_.screen();
     scr.begin(s.w, s.h);
     con_.hideCursor();
-    if (s.w < 50 || s.h < 12) {
+    if (s.w < 50 || s.h < 11) {
         scr.fillRect(0, 0, s.w, s.h, " ");
-        scr.putStr(0, 0, "窗口太小 (需要至少 50x12), 请放大终端。");
+        scr.putStr(0, 0, "窗口太小 (需要至少 50x11), 请放大终端。");
         return;
     }
     Layout L = calcLayout(s);
@@ -423,7 +549,6 @@ void TuiRegedit::draw() {
     drawTreePane(scr, L);
     drawValuePane(scr, L);
     drawStatusBar(scr, L);
-    drawFooter(scr, L);
 }
 
 // ---------------- 按键 ----------------
@@ -444,6 +569,7 @@ void TuiRegedit::handleKey(const Key& k) {
         actionSearch(); return;
     }
     if (k.type == Key::Char && (k.isCtrl('l') || k.isCtrl('g'))) { actionGoto(); return; }
+    if (k.type == Key::Char && k.isCtrl('p')) { commandPalette(); return; }
     if (k.type == Key::Char && k.isCtrl('e')) { actionExport(); return; }
     if (k.type == Key::Char && k.isCtrl('i')) { actionImport(); return; }
 
@@ -646,21 +772,8 @@ bool TuiRegedit::dialogInput(const std::string& title, const std::string& prompt
         if (k.mouse) {
             if (k.mpress && k.mbutton == 1) {
                 isDoubleClick(k);  // 维持双击计时状态
-                if (k.my == y + 4) {  // 单击输入框定位光标
-                    int col = k.mx - (x + 4);
-                    if (col < 0) col = 0;
-                    size_t pos = left;
-                    int wacc = 0;
-                    cursor = left;
-                    while (pos < buf.size()) {
-                        size_t len = utf8NextCharLen(buf, pos);
-                        size_t dl = 1;
-                        uint32_t cp = utf8DecodeOne(buf.c_str() + pos, buf.size() - pos, dl);
-                        int cw = isWideCodepoint(cp) ? 2 : 1;
-                        if (wacc + cw > col) break;
-                        wacc += cw; pos += len; cursor = pos;
-                    }
-                }
+                if (k.my == y + 4 && k.mx >= x + 4 && k.mx < x + 4 + fieldW)
+                    cursor = cursorFromColumn(buf, left, k.mx - (x + 4));
             }
             continue;
         }
@@ -772,6 +885,10 @@ void TuiRegedit::dialogHelp() {
     std::vector<std::string> lines = {
         "【TUI Regedit 帮助】",
         "",
+        "命令面板 (推荐新手用这个):",
+        "  Ctrl+P              打开命令面板, 输入命令名过滤, 回车执行",
+        "                      所有操作 (转到/查找/新建/删除/导出/刷新…) 都在里面",
+        "",
         "面板与导航:",
         "  Tab / Shift+Tab     在“注册表项(树)”与“值”面板间切换",
         "  ↑ ↓ k j             上下移动  |  Home/End 跳到头尾  |  PgUp/PgDn 翻页",
@@ -783,9 +900,11 @@ void TuiRegedit::dialogHelp() {
         "鼠标操作:",
         "  单击                选择项/值, 单击面板空白处切换面板",
         "  单击 [+]/[-]        直接展开/收起该项",
+        "  单击顶部路径        打开“转到路径”对话框",
         "  双击                展开收起项 / 打开编辑值",
         "  右键                上下文菜单 (新建/删除/重命名/导出/转到/刷新)",
         "  滚轮                滚动鼠标所在的面板",
+        "  右侧滚动条          单击空白处翻页, 按住滑块拖动快速滚动",
         "  对话框              菜单可单击选择、双击确认; 输入框可单击定位光标",
         "",
         "编辑操作:",
@@ -815,7 +934,7 @@ void TuiRegedit::dialogHelp() {
     Size s = con_.getSize();
     Screen& scr = con_.screen();
     int w = std::min(s.w - 4, 78);
-    int h = std::min(s.h - 2, 26);
+    int h = std::min(s.h - 2, 28);
     int x = (s.w - w) / 2, y = (s.h - h) / 2;
     int top = 0;
     int perPage = h - 4;
@@ -975,6 +1094,153 @@ bool TuiRegedit::dialogEditMulti(const std::string& title, std::vector<std::stri
             else if (k.ch == 'q' || k.ch == 'Q') return false;
         }
         else if (k.type == Key::Char && k.isCtrl('s')) return true;
+    }
+}
+
+struct PaletteCmd {
+    std::string name;
+    std::string keys;
+    std::function<void()> run;
+};
+
+void TuiRegedit::commandPalette() {
+    std::vector<PaletteCmd> all = {
+        {"转到路径", "Ctrl+L", [&]{ actionGoto(); }},
+        {"查找", "F", [&]{ actionSearch(); }},
+        {"新建项", "N", [&]{ actionNewKey(); }},
+        {"新建值", "N", [&]{ actionNewValue(); }},
+        {"编辑值", "E", [&]{ actionEditValue(); }},
+        {"删除所选项", "D", [&]{ actionDelete(); }},
+        {"重命名", "R", [&]{ actionRename(); }},
+        {"导出当前项", "Ctrl+E", [&]{ actionExport(); }},
+        {"导入 .reg", "Ctrl+I", [&]{ actionImport(); }},
+        {"刷新", "F5", [&]{ actionRefresh(); }},
+        {"切换面板", "Tab", [&]{
+            activePane_ = 1 - activePane_;
+            setStatus(activePane_ == 0 ? "已切换到: 注册表项(树)" : "已切换到: 值列表");
+        }},
+        {"展开/收起当前项", "→/←", [&]{ if (selectedNode()) toggleExpand(selectedNode()); }},
+        {"帮助", "F1", [&]{ dialogHelp(); }},
+        {"退出", "Q", [&]{ running_ = false; }},
+    };
+    Size s = con_.getSize();
+    Screen& scr = con_.screen();
+    int w = std::min(s.w - 6, 64);
+    int listH = std::min(10, s.h - 12);
+    if (listH < 4) listH = 4;
+    int h = listH + 7;
+    int x = (s.w - w) / 2;
+    int y = std::max(2, (s.h - h) / 2 - 2);  // 靠上, 类 VSCode
+    std::string filter;
+    size_t cursor = 0;
+    int sel = 0, top = 0;
+    int fieldW = w - 8;
+    if (fieldW < 10) fieldW = 10;
+    for (;;) {
+        std::vector<int> hit;
+        for (size_t i = 0; i < all.size(); i++)
+            if (fuzzyMatchCmd(filter, all[i].name)) hit.push_back((int)i);
+        sel = hit.empty() ? 0 : clampInt(sel, 0, (int)hit.size() - 1);
+        ensureVisible(sel, top, listH);
+        draw();
+        char title[64];
+        snprintf(title, sizeof(title), "命令面板 (%d/%d)", (int)hit.size(), (int)all.size());
+        drawBox(scr, x, y, w, h, title, true);
+        size_t left = 0;
+        while (left < cursor && utf8DisplayWidth(filter.substr(left, cursor - left)) >= fieldW)
+            left += utf8NextCharLen(filter, left);
+        std::string vis = filter.substr(left);
+        std::string shown;
+        {
+            int dw = 0;
+            for (size_t i = 0; i < vis.size();) {
+                size_t len = 1;
+                uint32_t cp = utf8DecodeOne(vis.c_str() + i, vis.size() - i, len);
+                int cw = isWideCodepoint(cp) ? 2 : 1;
+                if (dw + cw > fieldW) break;
+                shown.append(vis.substr(i, len));
+                dw += cw; i += len;
+            }
+        }
+        scr.putStr(x + 2, y + 2, "> ", A(Color::BrightCyan, Color::Black));
+        scr.putStr(x + 4, y + 2, padDisplay(shown, fieldW), A(Color::BrightWhite, Color::Black));
+        scr.putStr(x + 2, y + 3, rep("─", w - 4), A(Color::BrightBlack, Color::Black));
+        for (int r = 0; r < listH; r++) {
+            int idx = top + r;
+            int yy = y + 4 + r;
+            if (idx >= (int)hit.size()) {
+                if (hit.empty() && r == 0)
+                    scr.putStr(x + 2, yy, padDisplay("无匹配命令", w - 4), A(Color::BrightBlack, Color::Black));
+                else scr.fillRect(x + 2, yy, w - 4, 1, " ");
+                continue;
+            }
+            const auto& c = all[hit[idx]];
+            std::string t = truncateDisplay(c.name + "  (" + c.keys + ")", w - 6);
+            if (idx == sel)
+                scr.putStr(x + 2, yy, padDisplay("▸ " + t, w - 4), A(Color::BrightWhite, Color::Blue, true));
+            else
+                scr.putStr(x + 2, yy, padDisplay("  " + t, w - 4), A(Color::White, Color::Black));
+        }
+        scr.putStr(x + 2, y + h - 2, padDisplay(truncateDisplay("↑↓选择 │ Enter执行 │ Esc关闭 │ 输入过滤", w - 4), w - 4),
+                   A(Color::Yellow, Color::Black));
+        con_.present();
+        int cxx = (int)utf8DisplayWidth(filter.substr(left, cursor - left));
+        con_.moveCursor(x + 4 + cxx, y + 2);
+        con_.showCursor();
+        con_.flushOut();
+
+        Key k = con_.readKey();
+        con_.hideCursor();
+        if (k.mouse) {
+            if (k.mwheel > 0) { if (sel > 0) sel--; }
+            else if (k.mwheel < 0) { if (sel + 1 < (int)hit.size()) sel++; }
+            else if (k.mpress && k.mbutton == 1) {
+                bool dbl = isDoubleClick(k);
+                if (k.my == y + 2 && k.mx >= x + 4 && k.mx < x + 4 + fieldW) {
+                    cursor = cursorFromColumn(filter, left, k.mx - (x + 4));
+                } else {
+                    int r = k.my - (y + 4);
+                    if (r >= 0 && r < listH) {
+                        int idx = top + r;
+                        if (idx >= 0 && idx < (int)hit.size()) {
+                            sel = idx;
+                            if (dbl) { auto fn = all[hit[idx]].run; fn(); return; }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if (k.type == Key::Enter) {
+            if (!hit.empty()) { auto fn = all[hit[sel]].run; fn(); }
+            return;
+        }
+        if (k.type == Key::Esc) return;
+        if (k.type == Key::Char && k.isCtrl('c')) return;
+        if (k.type == Key::Up) { if (sel > 0) sel--; }
+        else if (k.type == Key::Down) { if (sel + 1 < (int)hit.size()) sel++; }
+        else if (k.type == Key::Home) sel = 0;
+        else if (k.type == Key::End) sel = hit.empty() ? 0 : (int)hit.size() - 1;
+        else if (k.type == Key::PgUp) sel = hit.empty() ? 0 : clampInt(sel - listH, 0, (int)hit.size() - 1);
+        else if (k.type == Key::PgDn) sel = hit.empty() ? 0 : clampInt(sel + listH, 0, (int)hit.size() - 1);
+        else if (k.type == Key::Left) { if (cursor > 0) cursor -= utf8PrevCharLen(filter, cursor); }
+        else if (k.type == Key::Right) { if (cursor < filter.size()) cursor += utf8NextCharLen(filter, cursor); }
+        else if (k.type == Key::Backspace) {
+            if (cursor > 0) {
+                size_t l = utf8PrevCharLen(filter, cursor);
+                filter.erase(cursor - l, l); cursor -= l; sel = 0; top = 0;
+            }
+        }
+        else if (k.type == Key::Delete) {
+            if (cursor < filter.size()) {
+                filter.erase(cursor, utf8NextCharLen(filter, cursor)); sel = 0; top = 0;
+            }
+        }
+        else if (k.type == Key::Char && k.isCtrl('u')) { filter.clear(); cursor = 0; sel = 0; top = 0; }
+        else if (k.type == Key::Char && !k.ctrl && !k.alt && k.ch >= 0x20) {
+            std::string ins = encodeUtf8(k.ch);
+            filter.insert(cursor, ins); cursor += ins.size(); sel = 0; top = 0;
+        }
     }
 }
 

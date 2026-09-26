@@ -49,6 +49,9 @@ private:
     // 鼠标双击检测状态
     std::chrono::steady_clock::time_point lastMouseTime_{};
     int lastMouseX_ = -1, lastMouseY_ = -1, lastMouseBtn_ = 0;
+    // 滚动条拖动状态
+    bool sbDrag_ = false;
+    int sbDragPane_ = -1;  // 0=树 1=值
 
     // ---- 树操作 ----
     void initRoots();
@@ -67,6 +70,7 @@ private:
     int valIndexAt(const Layout& L, int my);   // 行号 -> values_ 下标, 无效 -1
     bool isDoubleClick(const Key& k);
     void handleMouse(const Key& k);
+    void scrollbarJump(int pane, int my);
 
     // ---- 绘制 ----
     void draw();
@@ -74,7 +78,6 @@ private:
     void drawTreePane(Screen& scr, const Layout& L);
     void drawValuePane(Screen& scr, const Layout& L);
     void drawStatusBar(Screen& scr, const Layout& L);
-    void drawFooter(Screen& scr, const Layout& L);
     void drawBox(Screen& scr, int x, int y, int w, int h,
                  const std::string& title, bool active);
 
@@ -96,6 +99,7 @@ private:
     bool dialogEditQword(const std::string& title, uint64_t& v);
     bool dialogEditBinary(const std::string& title, std::vector<uint8_t>& data);
     bool dialogEditMulti(const std::string& title, std::vector<std::string>& lines);
+    void commandPalette();
 
     // ---- 动作 ----
     void actionEditValue();

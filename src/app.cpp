@@ -1100,12 +1100,6 @@ void TuiRegedit::dialogAbout() {
     Screen& scr = con_.screen();
     const Theme& th = theme();
     std::vector<std::string> lines = {
-        "_____ _   _ ___   ____          _ _ _",
-        "|_   _| | | |_ _| |  _ \\ ___  __| (_) |_",
-        "  | | | | | || |  | |_) / _ \\/ _` | | __|",
-        "  | | | |_| || |  |  _ <  __/ (_| | | |_",
-        "  |_|  \\___/|___| |_| \\_\\___|\\__,_|_|\\__|",
-        "",
         std::string("TUI Regedit v") + TUI_REGEDIT_VERSION,
         "终端里的 Windows 注册表编辑器",
         "",
@@ -1122,7 +1116,6 @@ void TuiRegedit::dialogAbout() {
     int h = (int)lines.size() + 6;
     if (h > s.h - 2) h = s.h - 2;
     int x = (s.w - w) / 2, y = (s.h - h) / 2;
-    Attr logoA = th.titleOn; logoA.bg = th.dlgText.bg;
     Attr verA = th.dlgHint; verA.bold = true;
     for (;;) {
         draw();
@@ -1130,8 +1123,7 @@ void TuiRegedit::dialogAbout() {
         for (size_t i = 0; i < lines.size() && (int)i < h - 5; i++) {
             std::string ln = centerDisplay(truncateDisplay(lines[i], w - 4), w - 4);
             Attr a = th.dlgText;
-            if (i < 5) a = logoA;
-            else if (i == 6) a = verA;
+            if (i == 0) a = verA;
             scr.putStr(x + 2, y + 2 + (int)i, ln, a);
         }
         scr.putStr(x + 2, y + h - 2, centerDisplay("按任意键关闭", w - 4), th.dlgHint);

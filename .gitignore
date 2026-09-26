@@ -1,0 +1,9 @@
+# 构建产物 (二进制走 GitHub Release, 不进仓库)
+/tui-regedit
+/tui-regedit.exe
+/build/
+/dist/
+/release/
+/artifacts/
+*.obj
+*.o

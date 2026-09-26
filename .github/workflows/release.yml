@@ -1,0 +1,77 @@
+# Release workflow: 推送 v* tag (或手动触发) -> 构建双版本 -> 创建 GitHub Release
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.1.0, 必须是已存在的 git tag)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-msvc:
+    name: Build (MSVC, Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build with MSVC
+        shell: cmd
+        run: |
+          mkdir dist
+          cl /std:c++17 /EHsc /O2 /Fe:dist\tui-regedit.exe src\main.cpp src\app.cpp src\tui.cpp src\registry_mock.cpp src\registry_win.cpp advapi32.lib /source-charset:utf-8 /execution-charset:utf-8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tui-regedit-msvc
+          path: dist/tui-regedit.exe
+
+  build-mingw:
+    name: Build (MinGW, Windows x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+      - name: Build with MinGW
+        run: |
+          mkdir -p dist
+          x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Isrc -static -static-libgcc -static-libstdc++ -o dist/tui-regedit.exe src/main.cpp src/app.cpp src/tui.cpp src/registry_mock.cpp src/registry_win.cpp -ladvapi32
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tui-regedit-mingw
+          path: dist/tui-regedit.exe
+
+  release:
+    name: Create GitHub Release
+    needs: [build-msvc, build-mingw]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Rename artifacts
+        run: |
+          mkdir -p release
+          cp artifacts/tui-regedit-msvc/tui-regedit.exe release/tui-regedit-msvc-x64.exe
+          cp artifacts/tui-regedit-mingw/tui-regedit.exe release/tui-regedit-mingw-x64.exe
+          ls -la release
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber release/tui-regedit-msvc-x64.exe release/tui-regedit-mingw-x64.exe
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes release/tui-regedit-msvc-x64.exe release/tui-regedit-mingw-x64.exe
+          fi
